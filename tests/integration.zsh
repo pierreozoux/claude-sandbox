@@ -156,6 +156,14 @@ test_claude_config_is_read_only_except_state() {
   assert_eq "$out" settings-writable
 }
 
+test_claude_gets_read_only_sandbox_instructions() {
+  mkproj p
+  sandbox sh -c '
+    grep -q "^# claude-sandbox" /etc/claude-code/CLAUDE.md && echo present
+    touch /etc/claude-code/CLAUDE.md 2>/dev/null && echo writable'
+  assert_eq "$out" present
+}
+
 test_claude_sessions_of_other_projects_are_invisible() {
   # Planting memory in another project's directory must not be possible
   mkproj a

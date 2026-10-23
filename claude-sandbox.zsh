@@ -148,6 +148,12 @@ claude-sandbox() {
   local -a tty=(-i)
   [[ -t 0 && -t 1 ]] && tty=(-it)
 
+  # Tell Claude where it is and what it cannot change, as managed-policy
+  # instructions: loaded in every session, read-only, outside ~/.claude
+  local instructions=$(mktemp)
+  _claude_sandbox_instructions $proj $wd $cfg $id "$config_rw" "$cluster" > $instructions
+  extra+=(-v $instructions:/etc/claude-code/CLAUDE.md:ro)
+
   local stamp=$(mktemp) rc
   docker run $tty --rm --init \
     --name claude-$id-$$ \
@@ -169,8 +175,66 @@ claude-sandbox() {
   rc=$?
 
   _claude_sandbox_audit $proj $stamp
-  rm -f $stamp
+  rm -f $stamp $instructions
   return $rc
+}
+
+# The session's instructions for Claude, in Markdown:
+#   _claude_sandbox_instructions PROJECT WORKDIR CONFIG ID CONFIG_RW CLUSTER
+_claude_sandbox_instructions() {
+  emulate -L zsh
+  local proj=$1 wd=$2 cfg=$3 id=$4 config_rw=$5 cluster=$6
+  local cc=$cfg/claude
+  cat <<EOF
+# claude-sandbox
+
+You run in claude-sandbox: a throwaway Docker container that sees only this
+project. The user's host is outside it, so when something must change there,
+give the user the exact command to run on the host, with the host paths below.
+
+| In the container | On the host |
+|---|---|
+| \`$wd\` (this project, read-write) | \`$proj\` |
+| \`~/.claude\` | \`$cc\` |
+| \`~/.claude/projects\` (sessions and memory of this project only) | \`$cfg/projects/$id\` |
+| \`~/.cache\` | Docker volume \`claude-cache-$id\` |
+
+- Everything else is lost when the session ends: \`/tmp\`, the rest of \`~\`,
+  anything installed outside the project.
+- \`~\` is not the user's home: no SSH keys, cloud credentials or other
+  projects. \`git push\`, \`gh\` and anything needing the user's credentials
+  fail: ask the user to run them on the host.
+- \`.git/config\` and \`.git/hooks\` (and those of submodules) are read-only:
+  the repository's \`git config\` cannot change. Give the user the host command.
+- No root, no sudo, no apt, no Docker. Get tools with Nix:
+  \`nix shell nixpkgs#tool\`, or add them to the project's dev shell. Builds run
+  on the host's nix-daemon, as an untrusted user; \`/nix/store\` is read-only.
+- Your memory is per project: what you saved in other projects, or outside
+  the sandbox, is not visible here, and what you save here stays here. A
+  preference for every project belongs in the global \`CLAUDE.md\`.
+- The container clock is UTC.
+EOF
+  if [[ -z $config_rw ]]; then
+    cat <<EOF
+- Started without \`--config-rw\`: \`settings.json\`, \`CLAUDE.md\`, \`agents/\`,
+  \`commands/\`, \`skills/\`, \`hooks/\` and \`plugins/\` in \`~/.claude\` are
+  read-only. To change them, give the user the command that edits
+  \`$cc/<file>\` on the host, or suggest restarting with
+  \`claude-sandbox --config-rw\` in a project they trust.
+EOF
+  else
+    cat <<EOF
+- Started with \`--config-rw\`: \`~/.claude\` settings, \`CLAUDE.md\`, agents,
+  commands, skills, hooks and plugins are writable, and changes apply to every
+  project's sessions. Make only the changes the user asked for.
+EOF
+  fi
+  if [[ -n $cluster ]]; then
+    cat <<EOF
+- Started with \`--kind $cluster\`: \`~/.kube/config\` (read-only) is a
+  cluster-admin kubeconfig for the kind cluster \`$cluster\` only.
+EOF
+  fi
 }
 
 # When the list of vulnerable nix-daemon versions below was last checked

@@ -252,6 +252,36 @@ test_existing_settings_are_kept() {
   assert_eq "$(<$HOME/.config/claude-sandbox/claude/settings.json)" '{"model":"x"}'
 }
 
+# Run the wrapper and keep a copy of the instructions it hands Claude; sets
+# $instructions too
+sandbox_instructions() {
+  STUB_DOCKER_DOES='cp "$(sed -n "s|:/etc/claude-code/CLAUDE.md:ro\$||p" "$T/docker.args")" "$T/instructions.md"' \
+    sandbox "$@"
+  instructions=$(<$T/instructions.md)
+}
+
+test_instructions_describe_the_session() {
+  mkproj p git
+  sandbox_instructions
+  local src=${${(M)args:#*:/etc/claude-code/CLAUDE.md:ro}%%:*}
+  [[ -n $src ]] || fail "instructions not mounted"
+  [[ ! -e $src ]] || fail "$src left behind"
+  local cfg=$HOME/.config/claude-sandbox
+  assert_contains "$instructions" "| \`$(wd)\` (this project, read-write) | \`$T/p\` |"
+  assert_contains "$instructions" "\`$cfg/claude\`"
+  assert_contains "$instructions" "\`$cfg/projects/${$(wd):t}\`"
+  assert_contains "$instructions" "Started without \`--config-rw\`"
+  assert_not_contains "$instructions" "--kind"
+}
+
+test_instructions_follow_the_options() {
+  mkproj p
+  sandbox_instructions --config-rw --kind dev
+  assert_contains "$instructions" "Started with \`--config-rw\`"
+  assert_not_contains "$instructions" "read-only. To change them"
+  assert_contains "$instructions" "Started with \`--kind dev\`"
+}
+
 # --- Git
 
 test_git_config_and_hooks_are_read_only() {
