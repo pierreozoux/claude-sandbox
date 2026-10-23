@@ -39,11 +39,12 @@ multi-user (daemon) mode, and zsh.
    source ~/src/claude-sandbox/claude-sandbox.zsh
    ```
 
-3. Go to a project that has a `flake.nix` or a `shell.nix`, and start the sandbox:
+3. Go to a project that has a `flake.nix` or a `shell.nix`, and start a shell
+   in the sandbox:
 
    ```sh
    cd ~/src/some-project
-   claude-sandbox
+   claude-sandbox bash
    ```
 
    You get a bash prompt inside the project's dev shell, at `/work/some-project-<hash>`
@@ -66,19 +67,23 @@ multi-user (daemon) mode, and zsh.
    claude
    ```
 
-6. Leave the shell. The container is removed. If Claude left anything your host
-   might run without asking, such as a nested git repository or a changed
-   `.envrc`, the wrapper lists it before you get your prompt back.
+6. Leave Claude, then the shell. The container is removed. If Claude left
+   anything your host might run without asking, such as a nested git
+   repository or a changed `.envrc`, the wrapper lists it before you get your
+   prompt back.
+
+From now on, `claude-sandbox` alone starts Claude directly in the dev shell.
 
 ---
 
 ## How-to guides
 
-### Run Claude directly, without the intermediate shell
+### Pass arguments to Claude, or run something else
 
 ```sh
-claude-sandbox claude
+claude-sandbox claude --resume
 claude-sandbox claude --dangerously-skip-permissions
+claude-sandbox bash
 ```
 
 Arguments after the options are run inside the dev shell. Use `--` if your
@@ -209,7 +214,7 @@ claude-sandbox [--kind NAME] [--config-rw] [--] [command [args...]]
 | `--kind NAME` | Join the `kind` network and mount the kubeconfig of cluster `NAME` read-only. |
 | `--config-rw` | Do not make Claude's settings, `CLAUDE.md`, agents, commands, skills, hooks and plugins read-only. |
 | `--` | End of options. |
-| `command` | What to run in the dev shell. Default: `bash`. |
+| `command` | What to run in the dev shell. Default: `claude`. |
 
 The wrapper refuses to start in `$HOME` or `/`, or when the path contains `:`.
 The return value is the container's exit status.

@@ -465,6 +465,13 @@ test_ep_envrc_wins_and_is_allowed() {
   assert_eq "$out" $'direnv allow .\ndirenv exec . say hi'
 }
 
+test_ep_starts_claude_by_default() {
+  mkproj p
+  touch flake.nix
+  ep
+  assert_eq "$out" "nix develop --command claude"
+}
+
 test_ep_flake() {
   mkproj p
   touch flake.nix shell.nix
@@ -496,7 +503,7 @@ test_ep_bash_is_the_images_interactive_bash() {
   # Dev shells put a readline-less bash first in PATH (no tab completion)
   mkproj p
   touch flake.nix
-  ep
+  ep bash
   assert_eq "$out" "nix develop --command /bin/bash"
   ep bash -c 'echo x'
   assert_eq "$out" "nix develop --command /bin/bash -c echo x"

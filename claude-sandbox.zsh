@@ -4,7 +4,7 @@
 #   docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t claude-sandbox .
 #
 # Usage:
-#   claude-sandbox [options] [--] [command...]     # default command: bash
+#   claude-sandbox [options] [--] [command...]     # default command: claude
 #     --kind NAME    also join the kind docker network, with that cluster's kubeconfig only
 #     --config-rw    leave Claude's settings, CLAUDE.md, skills, hooks... writable (to install plugins etc.)
 #

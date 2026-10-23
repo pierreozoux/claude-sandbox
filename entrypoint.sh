@@ -3,7 +3,7 @@
 # Priority: .envrc (direnv) > flake.nix (nix develop) > shell.nix/default.nix (nix-shell).
 set -euo pipefail
 
-[ $# -eq 0 ] && set -- bash
+[ $# -eq 0 ] && set -- claude
 
 # Dev shells put nixpkgs' stdenv bash first in PATH, and that bash is built
 # without readline: no tab completion, and PS1 shows a literal "\[\]".

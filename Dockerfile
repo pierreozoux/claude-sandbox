@@ -54,4 +54,4 @@ ENV PATH="/home/claude/.local/bin:${PATH}" \
     DISABLE_AUTOUPDATER=1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["bash"]
+CMD ["claude"]
