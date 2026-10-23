@@ -6,9 +6,13 @@
 # Usage:
 #   claude-sandbox [options] [--] [command...]     # default command: claude
 #     --kind NAME    also join the kind docker network, with that cluster's kubeconfig only
-#     --config-rw    leave Claude's settings, CLAUDE.md, skills, hooks... writable (to install plugins etc.)
+#     --config-rw    leave plugins writable, to install or update them
 #
-# See README.md for what this protects against, and what it does not.
+# Set up with `just install`. See README.md for what this protects against,
+# and what it does not.
+
+# Claude's reviewed global config (sessions, review, login check)
+source ${${(%):-%x}:A:h}/config.zsh
 
 claude-sandbox() {
   emulate -L zsh
@@ -52,6 +56,12 @@ claude-sandbox() {
   # Claude keys sessions and memory on the working directory, so it must be
   # unique per project too
   local wd=/work/$id
+
+  if [[ ! -d $cfg/config/.git ]]; then
+    print -u2 "claude-sandbox: no config repository in $cfg/config;"
+    print -u2 "  run \`just install\` in your claude-sandbox checkout first"
+    return 1
+  fi
 
   # --- Nix: host store read-only, builds go through the host daemon (untrusted user)
   if (( ! $+commands[nix] )); then
@@ -128,17 +138,29 @@ claude-sandbox() {
     print -u2 "claude-sandbox: git user.name/user.email not set on host, commits will fail"
   fi
 
-  # --- Claude config: shared across projects (login, history), but what changes
-  # Claude's behaviour in every later session is read-only unless --config-rw.
-  local cc=$cfg/claude
-  mkdir -p $cc/{agents,commands,skills,hooks,plugins}
-  [[ -e $cc/settings.json ]] || print '{}' > $cc/settings.json
-  [[ -e $cc/CLAUDE.md ]] || : > $cc/CLAUDE.md
-  if [[ -z $config_rw ]]; then
-    for f in settings.json CLAUDE.md agents commands skills hooks plugins; do
-      extra+=(-v $cc/$f:/home/claude/.claude/${f}:ro)
-    done
-  fi
+  # --- Claude config: each session gets its own copy of the approved config
+  # (config.zsh), and what it changes there reaches later sessions only once
+  # you accept it. Settle what earlier sessions left first.
+  _claude_sandbox_recover $cfg
+  _claude_sandbox_auth_check $cfg
+  _claude_sandbox_review_pending $cfg
+  # The reviewer's container may have refreshed the login: check that too
+  _claude_sandbox_auth_check $cfg
+  _claude_sandbox_session_open $cfg $id || {
+    print -u2 "claude-sandbox: could not make this session's copy of the config"
+    return 1
+  }
+  local sid=$REPLY
+  local wt=$cfg/sessions/$sid
+  extra+=(-v $wt:/home/claude/.claude)
+  # The login is shared, so that a token refreshed by one session is seen by
+  # the others; the wrapper checks it is still your account (config.zsh)
+  extra+=(
+    -v $cfg/auth:/home/claude/.claude-auth
+    -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/home/claude/.claude-auth
+  )
+  # Plugins are too big to review as a diff: installing one takes --config-rw
+  extra+=(-v $cfg/plugins:/home/claude/.claude/plugins:${${config_rw:+rw}:-ro})
   # Sessions, transcripts and auto-memory: one directory per project, so a
   # session cannot read other projects' transcripts or plant memory in them
   mkdir -p $cfg/projects/$id
@@ -156,7 +178,7 @@ claude-sandbox() {
 
   local stamp=$(mktemp) rc
   docker run $tty --rm --init \
-    --name claude-$id-$$ \
+    --name claude-$sid \
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
     --pids-limit=2048 \
@@ -165,7 +187,6 @@ claude-sandbox() {
     -v /nix/store:/nix/store:ro \
     -v /nix/var/nix/daemon-socket:/nix/var/nix/daemon-socket \
     -v claude-cache-$id:/home/claude/.cache \
-    -v $cc:/home/claude/.claude \
     -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
     $env \
     -v $proj:$wd \
@@ -174,8 +195,16 @@ claude-sandbox() {
     ${CLAUDE_SANDBOX_IMAGE:-claude-sandbox} "$@"
   rc=$?
 
+  _claude_sandbox_session_close $cfg $sid
+  rm -f $wt.lock
+  zsystem flock -u $_CLAUDE_SANDBOX_LOCK_FD
+  # The report first: it quarantines what your prompt must not run, even if
+  # you interrupt the review that follows
   _claude_sandbox_audit $proj $stamp
   rm -f $stamp $instructions
+  _claude_sandbox_auth_check $cfg
+  _claude_sandbox_review_pending $cfg
+  _claude_sandbox_auth_check $cfg
   return $rc
 }
 
@@ -184,7 +213,6 @@ claude-sandbox() {
 _claude_sandbox_instructions() {
   emulate -L zsh
   local proj=$1 wd=$2 cfg=$3 id=$4 config_rw=$5 cluster=$6
-  local cc=$cfg/claude
   cat <<EOF
 # claude-sandbox
 
@@ -195,8 +223,9 @@ give the user the exact command to run on the host, with the host paths below.
 | In the container | On the host |
 |---|---|
 | \`$wd\` (this project, read-write) | \`$proj\` |
-| \`~/.claude\` | \`$cc\` |
+| \`~/.claude\` (this session's copy of the global config) | \`$cfg/config\` (approved config, a git repository) |
 | \`~/.claude/projects\` (sessions and memory of this project only) | \`$cfg/projects/$id\` |
+| \`~/.claude/plugins\` | \`$cfg/plugins\` |
 | \`~/.cache\` | Docker volume \`claude-cache-$id\` |
 
 - Everything else is lost when the session ends: \`/tmp\`, the rest of \`~\`,
@@ -212,21 +241,26 @@ give the user the exact command to run on the host, with the host paths below.
 - Your memory is per project: what you saved in other projects, or outside
   the sandbox, is not visible here, and what you save here stays here. A
   preference for every project belongs in the global \`CLAUDE.md\`.
+- The global config in \`~/.claude\` (\`CLAUDE.md\`, \`settings.json\`,
+  \`keybindings.json\`, \`agents/\`, \`commands/\`, \`skills/\`, \`hooks/\`,
+  \`output-styles/\`, \`agent-memory/\`) is writable, but it is
+  this session's copy: when the session ends, the user reviews what you
+  changed, and only what they accept reaches later sessions. Change it only
+  when the user asks, and tell them they will be asked to accept it. Anything
+  else you write in \`~/.claude\` is dropped.
 - The container clock is UTC.
 EOF
   if [[ -z $config_rw ]]; then
     cat <<EOF
-- Started without \`--config-rw\`: \`settings.json\`, \`CLAUDE.md\`, \`agents/\`,
-  \`commands/\`, \`skills/\`, \`hooks/\` and \`plugins/\` in \`~/.claude\` are
-  read-only. To change them, give the user the command that edits
-  \`$cc/<file>\` on the host, or suggest restarting with
-  \`claude-sandbox --config-rw\` in a project they trust.
+- Started without \`--config-rw\`: \`~/.claude/plugins\` is read-only. To
+  install or update a plugin, the user restarts with
+  \`claude-sandbox --config-rw\`, in a project they trust.
 EOF
   else
     cat <<EOF
-- Started with \`--config-rw\`: \`~/.claude\` settings, \`CLAUDE.md\`, agents,
-  commands, skills, hooks and plugins are writable, and changes apply to every
-  project's sessions. Make only the changes the user asked for.
+- Started with \`--config-rw\`: \`~/.claude/plugins\` is writable, and a plugin
+  installed here runs in every project's sessions without review. Install only
+  what the user asked for.
 EOF
   fi
   if [[ -n $cluster ]]; then
@@ -309,7 +343,7 @@ _claude_sandbox_audit() {
   if (( $#repos || $#bare )); then
     print -u2 "claude-sandbox: nested git repositories in the project; their config runs"
     print -u2 "  code when git touches them (your prompt included). Check before cd-ing in:"
-    print -u2 -l -- "    "${^repos} "    "${^bare}
+    _claude_sandbox_list $repos $bare
   fi
 
   touched=(${(f)"$(find $proj -path $proj/.git -prune -o -newer $stamp \( \
@@ -319,6 +353,16 @@ _claude_sandbox_audit() {
       -o -path '*/.vscode/*' -o -path '*/.github/workflows/*' \) -print 2>/dev/null)"})
   if (( $#touched )); then
     print -u2 "claude-sandbox: changed files your host may execute (direnv, nix, make, editors):"
-    print -u2 -l -- "    "${^touched}
+    _claude_sandbox_list $touched
+  fi
+
+  # Not reviewed like the global config: the project is the session's to change
+  touched=(${(f)"$(find $proj -path $proj/.git -prune -o -newer $stamp -type f \( \
+      -path '*/.claude/*' -o -name .mcp.json -o -name CLAUDE.md -o -name CLAUDE.local.md \
+      \) -print 2>/dev/null)"})
+  if (( $#touched )); then
+    print -u2 "claude-sandbox: changed files the next Claude session in this project loads"
+    print -u2 "  (settings, hooks, skills, MCP servers, instructions):"
+    _claude_sandbox_list $touched
   fi
 }

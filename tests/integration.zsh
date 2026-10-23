@@ -33,7 +33,12 @@ setup() {
   unset CLAUDE_SANDBOX_ALLOW_TRUSTED
   typeset -ga PROJECTS=()
   source $ROOT/claude-sandbox.zsh
+  CFG=$HOME/.config/claude-sandbox
+  _claude_sandbox_init_config $CFG
 }
+
+# The pending changes to Claude's config (branches session/*)
+pending() { git -C $CFG/config for-each-ref --format='%(refname:short)' refs/heads/session/ }
 
 # Remove the per-project cache volumes the tests created
 teardown() {
@@ -144,16 +149,41 @@ test_claude_is_installed() {
   assert_contains "$out" "Claude Code"
 }
 
-test_claude_config_is_read_only_except_state() {
+test_config_changes_wait_for_review() {
   mkproj p
+  # Claude Code saves files by writing a temporary file and renaming it: that
+  # must work on the config, which is why ~/.claude is mounted as a directory
   sandbox sh -c '
-    touch ~/.claude/settings.json 2>/dev/null && echo settings-writable
-    touch ~/.claude/CLAUDE.md 2>/dev/null && echo claude-md-writable
-    touch ~/.claude/skills/x 2>/dev/null && echo skills-writable
-    touch ~/.claude/state && echo state-writable'
-  assert_eq "$out" state-writable
-  sandbox --config-rw sh -c 'touch ~/.claude/settings.json && echo settings-writable'
-  assert_eq "$out" settings-writable
+    echo "{\"model\": \"x\"}" > ~/.claude/settings.json.tmp &&
+      mv ~/.claude/settings.json.tmp ~/.claude/settings.json && echo renamed
+    echo learned >> ~/.claude/CLAUDE.md
+    touch ~/.claude/plugins/x 2>/dev/null && echo plugins-writable
+    true'
+  assert_eq "$out" renamed
+  assert_eq "$(git -C $CFG/config show HEAD:CLAUDE.md)" "" "not applied before review"
+  local ref=$(pending)
+  [[ -n $ref ]] || fail "expected a pending change"
+  assert_eq "$(git -C $CFG/config show ${ref}:CLAUDE.md)" learned
+  assert_eq "$(git -C $CFG/config show ${ref}:settings.json)" '{"model": "x"}'
+  assert_contains "$err" "wait for your review"
+  local -a left=($CFG/sessions/*(DN))
+  assert_eq $#left 0 "the session's copy is removed"
+}
+
+test_config_rw_makes_plugins_writable() {
+  mkproj p
+  sandbox --config-rw sh -c 'touch ~/.claude/plugins/x && echo plugins-writable'
+  assert_eq "$out" plugins-writable
+}
+
+test_login_directory_is_shared_by_sessions() {
+  mkproj a
+  # Anything but the login files is removed between sessions: probe with one
+  sandbox sh -c 'echo $CLAUDE_SECURESTORAGE_CONFIG_DIR; echo from-a > ~/.claude-auth/.device-keys.json'
+  assert_eq "$out" /home/claude/.claude-auth
+  mkproj b
+  sandbox sh -c 'cat ~/.claude-auth/.device-keys.json'
+  assert_eq "$out" from-a
 }
 
 test_claude_gets_read_only_sandbox_instructions() {

@@ -22,16 +22,19 @@ what the container can and cannot touch.
 You need: Linux, Docker (with your user in the `docker` group), Nix in
 multi-user (daemon) mode, and zsh.
 
-1. Clone this repository and build the image with your own uid/gid:
+1. Clone this repository, then install: this builds the image with your own
+   uid/gid, and sets up Claude's global config in `~/.config/claude-sandbox`:
 
    ```sh
    git clone https://github.com/pierreozoux/claude-sandbox ~/src/claude-sandbox
    cd ~/src/claude-sandbox
-   nix develop -c just build
+   nix develop -c just install
    ```
 
-   Without the flake, the same build is
-   `docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) -t claude-sandbox .`
+   If you already use Claude Code on this machine, the installer offers to
+   import what it learned in `~/.claude` (your `CLAUDE.md`, skills, agents,
+   commands, and each project's memory). Opus reviews each part first, and you
+   accept or reject it.
 
 2. Load the function in your shell, and add the same line to `~/.zshrc`:
 
@@ -61,18 +64,27 @@ multi-user (daemon) mode, and zsh.
    ```
 
 5. Start Claude and log in. The login is stored in
-   `~/.config/claude-sandbox/claude` on the host, so you do it only once:
+   `~/.config/claude-sandbox/auth` on the host, shared by all sessions, so you
+   do it only once:
 
    ```sh
    claude
    ```
 
+   Ask Claude to remember a preference for all your projects, for example
+   "always write commit messages in Conventional Commits format, in the global
+   CLAUDE.md".
+
 6. Leave Claude, then the shell. The container is removed. If Claude left
    anything your host might run without asking, such as a nested git
-   repository or a changed `.envrc`, the wrapper lists it before you get your
-   prompt back.
+   repository or a changed `.envrc`, the wrapper lists it. Then it shows you
+   what Claude changed in its global config, with Opus's review of it, and asks
+   you to accept it: press `a`. It also shows the email address of the account
+   you logged in with, and asks you to confirm it: from then on, a change of
+   account is caught.
 
-From now on, `claude-sandbox` alone starts Claude directly in the dev shell.
+From now on, `claude-sandbox` alone starts Claude directly in the dev shell,
+and every session, in every project, starts with the preference you accepted.
 
 ---
 
@@ -117,23 +129,88 @@ and update the wrapper's list of vulnerable daemon versions.
 To install a specific Claude Code version instead:
 `just pin-claude 2.1.170 && just build`.
 
-### Change Claude's settings, or install plugins and skills
+### Teach Claude something for all your projects
 
-Settings, `CLAUDE.md`, agents, commands, skills, hooks and plugins are read-only
-inside the sandbox, so a session cannot change how later sessions behave. To
-change them, do one of the following:
+Ask Claude in any session to change its global config: `CLAUDE.md`,
+`settings.json` (permissions, for example), skills, agents, commands or hooks.
+It edits its own copy, and when the session ends the wrapper asks you:
 
-- edit the files on the host in `~/.config/claude-sandbox/claude/`, or
-- start one deliberate session with `claude-sandbox --config-rw claude`,
-  in a project you trust, and make the change there.
+```
+claude-sandbox: app-1a2b3c4d-4242-1792750000123456 changed Claude's global config (all projects):
+ CLAUDE.md | 1 +
+  asking Opus to review it...
+  Opus: harmless
+    - adds a commit message convention: an ordinary preference
+  [a]ccept, [r]eject, [d]iff, [l]ater?
+```
 
-Claude knows this (see [What Claude is told](#what-claude-is-told)): when you
-ask it for such a change in a normal session, it gives you the command to run
-on the host instead.
+- `a` merges it into `~/.config/claude-sandbox/config`: later sessions get it.
+- `r` drops it. `d` shows the diff. `l` (or no answer) keeps it for later: the
+  next `claude-sandbox` you start in a terminal asks again, before its session
+  starts.
 
-Memory is different: Claude can write it, but it is per project. A preference
-you want in every project, such as a commit message convention, belongs in
-`~/.config/claude-sandbox/claude/CLAUDE.md`.
+When Opus finds the change suspicious, when it could not review it, or when the
+change has anything that runs code (hooks, `settings.json`, an executable, a
+skill's `hooks:` or `allowed-tools:`, an inline `` !`command` ``, URLs, invisible
+Unicode), the wrapper shows you the whole diff before asking. See
+[Claude's configuration](#claudes-configuration) for why you, not Opus, decide.
+
+Memory is different: Claude writes it without review, but only for the project
+it is in.
+
+### Change Claude's config by hand
+
+`~/.config/claude-sandbox/config` is a git repository. Edit it and commit:
+
+```sh
+cd ~/.config/claude-sandbox/config
+$EDITOR CLAUDE.md
+git commit -am "Prefer tabs"
+```
+
+Sessions start from its last commit. While it has uncommitted changes, the
+wrapper does not merge accepted changes into it, and keeps them waiting. `git
+log` shows every change you accepted, and `git revert` undoes one.
+
+### Install a plugin
+
+Plugins are too big to review as a diff, so `~/.claude/plugins` is read-only.
+Start one deliberate session with the plugins writable, in a project you trust:
+
+```sh
+claude-sandbox --config-rw claude
+```
+
+and install the plugin there. Enabling it changes `settings.json`, which you
+review at the end like any other change.
+
+### Recover from a session that died
+
+If you close the terminal or kill the shell while a session runs, the wrapper
+cannot clean up. The next `claude-sandbox` you start finds the session's copy
+of the config, saves what it changed as a pending change (you review it as
+usual), and removes the copy. A copy whose wrapper or container still runs is
+left alone.
+
+If saving a session's changes fails, the wrapper keeps its copy in
+`~/.config/claude-sandbox/failed/` and says so: look at it, copy what you want
+into `config/`, and commit.
+
+### When the wrapper quarantines your login
+
+After your first login, the wrapper shows the account's email address and asks
+you to confirm it, then records the account. Whenever the login changes after
+that (a token refresh does this every few hours), the wrapper asks Anthropic
+which account it belongs to. It quarantines the login when it is another
+account, when Anthropic rejects it, when it is not written the way Claude Code
+writes it, or when its refresh token changed without its access token. Any of
+these means a session probably replaced it, for example to sign every later
+session into an account that receives your prompts and code. The login goes to
+`~/.config/claude-sandbox/quarantine`, and the next session asks you to log in
+again.
+
+If you switched accounts yourself, delete `~/.config/claude-sandbox/account`
+and log in again: you confirm the new account.
 
 ### Harden your host git against planted repositories
 
@@ -158,6 +235,9 @@ enter it.
    `flake.nix` `shellHook`, `justfile`, `Makefile`, `package.json` scripts,
    `.vscode/`, CI files) *before* you `cd` into subdirectories, run `direnv allow`,
    or run builds and tests on the host.
+4. Read changes to what the next Claude session in this project loads: the
+   project's `.claude/` (settings, hooks, skills), `.mcp.json`, `CLAUDE.md` and
+   `CLAUDE.local.md`. Unlike the global config, these are not reviewed for you.
 
 ### Free disk space
 
@@ -170,8 +250,9 @@ just clean-volumes          # all of them
 ```
 
 Claude's sessions and memory for each project are in
-`~/.config/claude-sandbox/projects/<project>-<hash>/`, and can be deleted the
-same way.
+`~/.config/claude-sandbox/projects/<project>-<hash>/`, and its `claude.json` and
+prompt history in `~/.config/claude-sandbox/state/<project>-<hash>/`. Both can
+be deleted the same way.
 
 ### Run the tests
 
@@ -212,12 +293,32 @@ claude-sandbox [--kind NAME] [--config-rw] [--] [command [args...]]
 | Option | Effect |
 |---|---|
 | `--kind NAME` | Join the `kind` network and mount the kubeconfig of cluster `NAME` read-only. |
-| `--config-rw` | Do not make Claude's settings, `CLAUDE.md`, agents, commands, skills, hooks and plugins read-only. |
+| `--config-rw` | Make `~/.claude/plugins` writable, to install or update plugins. |
 | `--` | End of options. |
 | `command` | What to run in the dev shell. Default: `claude`. |
 
-The wrapper refuses to start in `$HOME` or `/`, or when the path contains `:`.
-The return value is the container's exit status.
+The wrapper refuses to start in `$HOME` or `/`, when the path contains `:`, or
+before `just install` (no `~/.config/claude-sandbox/config`). The return value
+is the container's exit status.
+
+### Files on the host
+
+In `~/.config/claude-sandbox`:
+
+| Path | What | Seen by sessions |
+|---|---|---|
+| `config/` | Git repository of the approved global config: `CLAUDE.md`, `settings.json`, `keybindings.json`, `agents/`, `commands/`, `skills/`, `hooks/`, `output-styles/`, `agent-memory/`. Branches `session/*` are changes waiting for review. | never directly |
+| `sessions/<id>-<pid>-<time>/` | One running session's copy of `config/`, with `.base`, `.index`, `.lines` and `.lock` files next to it. Removed when the session ends. | as `~/.claude`, rw |
+| `auth/` | The login (`.credentials.json`, and `.device-keys.json` if Claude Code writes one), shared by all sessions. Anything else is removed. | rw |
+| `account`, `auth.verified` | The account you confirmed at the first login, and the sha256 of the login (file, access token, refresh token) as last checked. | no |
+| `quarantine/` | Logins that were not your account. | no |
+| `failed/` | Copies of sessions whose changes could not be saved. | no |
+| `plugins/` | Installed plugins. | ro, rw with `--config-rw` |
+| `projects/<name>-<hash>/` | Transcripts and auto-memory, per project. | rw, its own only |
+| `state/<name>-<hash>/` | `claude.json` and `history.jsonl` (prompt history), per project. | copied in and out |
+| `claude.json.template` | What a new project's `claude.json` starts from: the previous shared one, without projects or MCP servers. | no |
+| `review.lock` | Held while one terminal reviews, so two do not merge at once. | no |
+| `kind-NAME.kubeconfig` | Written by `--kind NAME`. | ro, with `--kind` |
 
 ### Environment variables (host)
 
@@ -227,6 +328,7 @@ The return value is the container's exit status.
 | `CLAUDE_SANDBOX_IMAGE` | `claude-sandbox` | Image to run (and to build/test with `just`). |
 | `CLAUDE_SANDBOX_MEMORY` | `8g` | Container memory limit (`docker run --memory`). |
 | `CLAUDE_SANDBOX_ALLOW_TRUSTED` | unset | Start even if the nix-daemon lists you in `trusted-users` (see [Nix](#nix)). |
+| `CLAUDE_SANDBOX_IMPORT_FROM` | `~/.claude` | What `just install` imports from; empty imports nothing. |
 
 ### Build arguments
 
@@ -245,8 +347,9 @@ The return value is the container's exit status.
 | `config.worktree` (when `extensions.worktreeConfig` is on), `.git/worktrees/*/{commondir,config.worktree}` | same paths | **ro** |
 | `/nix/store` | `/nix/store` | **ro** |
 | `/nix/var/nix/daemon-socket` | same | rw (socket) |
-| `~/.config/claude-sandbox/claude` | `~/.claude` | rw |
-| … its `settings.json`, `CLAUDE.md`, `agents/`, `commands/`, `skills/`, `hooks/`, `plugins/` | same | **ro** unless `--config-rw` |
+| `~/.config/claude-sandbox/sessions/<session>` (this session's copy of the config) | `~/.claude` | rw, reviewed when the session ends |
+| `~/.config/claude-sandbox/auth` | `~/.claude-auth` (`CLAUDE_SECURESTORAGE_CONFIG_DIR`) | rw, shared |
+| `~/.config/claude-sandbox/plugins` | `~/.claude/plugins` | **ro** unless `--config-rw` |
 | `~/.config/claude-sandbox/projects/<name>-<hash>` | `~/.claude/projects` | rw, one per project |
 | `~/.config/claude-sandbox/kind-NAME.kubeconfig` | `~/.kube/config` | **ro**, with `--kind` only |
 | session instructions, generated by the wrapper | `/etc/claude-code/CLAUDE.md` | **ro** |
@@ -283,28 +386,73 @@ A bare `bash` is replaced by `/bin/bash`, the image's interactive bash.
 | That list of vulnerable versions was checked more than 6 months ago | Warning: update claude-sandbox. |
 | Host git has no `user.name` / `user.email` | Warning. |
 | `.git` is a file (linked worktree or submodule checkout) | Warning: its config is not protected. |
+| No `~/.config/claude-sandbox/config` | Refuses to start: run `just install`. |
+| A session's copy of the config whose wrapper and container are gone | Its changes become a pending change, and the copy is removed. |
+| The login changed since it was last checked | Checked against the recorded account (see below). |
+| Changes to the config wait for review, and there is a terminal | Reviewed before the session starts. |
 
-### Post-session report
+### Post-session report and review
+
+| Finding | Action |
+|---|---|
+| The session changed the config (`CLAUDE.md`, `settings.json`, `keybindings.json`, `agents/`, `commands/`, `skills/`, `hooks/`, `output-styles/`, `agent-memory/`) | Committed on a branch `session/<id>` (dots in the id become `_`), then reviewed: Opus's verdict and notes, flags (below), then `[a]ccept, [r]eject, [d]iff, [l]ater`. Without a terminal, it waits. |
+| A `.git` or `.gitattributes` inside those directories (a cloned skill, say) | Dropped before the commit, and listed: the skill's files are kept. |
+| Saving the change fails | The copy is moved to `failed/`, with a warning. |
+| Anything else written in `~/.claude` (`plans/`, `todos/`, `file-history/`, …) | Dropped with the copy. |
+| The session added MCP servers to the project's `claude.json` | Listed. |
+| Anything in `auth/` but the login files | Removed, and listed. |
+| The login changed: another account, rejected by Anthropic (401/403), not valid JSON, a new refresh token with the old access token, not a regular file | Moved to `quarantine/`, with a warning. |
+| The login changed and could not be checked (offline, curl missing) | Warning; checked again next time. |
+| First login | You confirm the account, shown by its email address; without a terminal, it waits. |
+
+Flags, which show the whole diff whatever Opus says: changes in `hooks/` or
+`settings.json`, an executable file, a symlink, a nested repository, a binary
+file, skill or agent frontmatter with `hooks`, `allowed-tools`, `shell`,
+`mcpServers` or `permissionMode` (quoted or not), an inline `` !`command` ``
+or a fenced ```` ```! ```` block, `curl`, `wget`, a URL, `base64` or a pipe
+into a shell, an
+`@import` (it loads a file the diff does not show), a mention of
+`.claude-auth`, `/nix/store` or `.cache` (places other sessions can write),
+and zero-width, bidirectional, variation-selector, soft-hyphen, line-separator
+or tag Unicode characters. Diffs, Opus's answer, and every name a session
+chose (files left in `auth/` or in the project) are shown with control
+characters replaced by `?` (so no escape sequence reaches your terminal), and
+with `cat -v` when invisible characters were found. Git on the config ignores
+your global and system git config, so that `diff.noprefix` or a filter driver
+cannot change what the flags see or run on what a session wrote.
+
+The login is read with `jq` (yours, or the image's when you have none), the
+way Claude Code reads it: only `claudeAiOauth`, not the MCP servers' tokens
+stored next to it, and with the last of duplicate keys. It is checked before
+and after the reviews, since the reviewer's container can refresh it.
+
+### Post-session report on the project
 
 | Finding | Action |
 |---|---|
 | `.git/commondir` exists | It is renamed to `commondir.quarantined`. |
 | Nested `.git` (directory or file) or bare-repository layout | Listed. |
 | `.envrc`, `flake.nix`, `shell.nix`, `default.nix`, `justfile`, `Makefile`, `package.json`, `.gitattributes`, `.gitmodules`, `.pre-commit-config.yaml`, `.vscode/*`, `.github/workflows/*` modified during the session | Listed. |
+| `.claude/*`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md` modified during the session | Listed: the next session in this project loads them. |
 
 ### Development
 
 | File | Purpose |
 |---|---|
-| `flake.nix` | Dev shell (`just`, `zsh`, `git`, `shellcheck`, `kind`; Docker comes from the host) and `checks` (lint, unit tests). |
+| `claude-sandbox.zsh` | The wrapper: pre-flight checks, mounts, the post-session report. |
+| `config.zsh` | Claude's reviewed global config: sessions' copies, recovery, review, merge, and the login check. Sourced by the wrapper. |
+| `install.zsh` | `just install`: the layout, the migration from the read-only layout, and the import from `~/.claude`. |
+| `TODO.md` | What to build next: the credential and egress proxy. |
+| `flake.nix` | Dev shell (`just`, `zsh`, `git`, `jq`, `shellcheck`, `kind`; Docker comes from the host) and `checks` (lint, unit tests). |
 | `.envrc` | `use flake`: direnv loads the dev shell when you `cd` in (after `direnv allow`). |
 | `justfile` | The recipes below. |
 | `tests/lib.zsh` | Test harness. Each `test_*` function runs in a subshell, in its own temporary directory, and stops at its first failing command. |
-| `tests/unit.zsh` | Wrapper and entrypoint logic. `docker`, `nix`, `nix-instantiate` and `kind` are stubs, and `PATH` holds only the tools needed. |
-| `tests/integration.zsh` | Real containers: privileges, git protection, config read-only, dev shells, the nix-daemon's view of you. Uses a temporary `HOME`, and removes the cache volumes it creates. |
+| `tests/unit.zsh` | Wrapper, config review, installer and entrypoint logic. `docker` (including the reviewer), `curl`, `nix`, `nix-instantiate` and `kind` are stubs, the prompts are scripted, and `PATH` holds only the tools needed. |
+| `tests/integration.zsh` | Real containers: privileges, git protection, config changes waiting for review, the shared login directory, dev shells, the nix-daemon's view of you. Uses a temporary `HOME`, makes no API calls, and removes the cache volumes it creates. |
 
 | Recipe | Does |
 |---|---|
+| `just install` | `build`, then set up `~/.config/claude-sandbox`, migrate the read-only layout of earlier versions, and import from `~/.claude` after review. Safe to run again. |
 | `just build [flags]` | `docker build` for your uid/gid; extra flags go to `docker build`. |
 | `just update` | Pin the base image to the current `debian:trixie-slim` digest, `nix flake update`, `pin-claude`, then `build --no-cache`. |
 | `just pin-claude [VERSION]` | Pin Claude Code to `VERSION` (default: the latest release) and its checksums in the `Dockerfile`. |
@@ -330,8 +478,9 @@ The goals, from strongest to weakest:
 2. **Your tools do not run what Claude planted.** Host git must not run
    hooks or config written by Claude.
 3. **Sessions do not contaminate each other.** One project's session must
-   not change how Claude behaves in the next project. This goal has known
-   gaps, listed in [Claude's configuration](#claudes-configuration).
+   not change how Claude behaves in the next project without you accepting
+   it. This goal has known gaps, listed in
+   [Claude's configuration](#claudes-configuration).
 
 What it does **not** try to do:
 
@@ -394,28 +543,91 @@ and [Pillar's Cursor finding](https://www.pillar.security/blog/git-directories-d
 
 ### Claude's configuration
 
-One config directory is shared by all projects, so you log in once. The parts
-that change Claude's *behaviour* in every later session (settings and their
-hooks, `CLAUDE.md`, agents, commands, skills, plugins) are read-only. Without
-this, an injection in one project could install a hook that runs in all the
-others.
+You want Claude to learn with you: a convention, a permission, a skill, kept
+for every later session in every project. A prompt injection wants the same
+thing: one line in `CLAUDE.md` or one hook, and it runs in all your projects
+from then on. So the global config can change, but only through you.
 
-`~/.claude/projects`, which holds session transcripts and Claude's
-auto-memory, is mounted from a separate directory for each project. Memory is
-loaded into context at the start of every session, so with one shared
-directory a session could plant instructions in another project's memory, and
-read every other project's transcripts. Caches (`~/.cache`) are per project as
-well, so a poisoned package cache stays in its project.
+**One copy per session.** The approved config is a git repository that no
+container sees. Each session gets its own copy as `~/.claude`, so sessions
+running in parallel never see each other's unreviewed changes. A copy is a
+plain directory, not a git worktree: there is no `.git` in it for a session to
+point elsewhere, and the wrapper runs git on it with an explicit git dir and
+index, no hooks and no fsmonitor. It is mounted as a directory because Claude
+Code saves a file by writing a temporary one and renaming it, which fails on a
+file mounted on its own.
 
-These remain shared and writable, so goal 3 does not fully hold:
+**You decide, Opus helps.** When the session ends, what it changed in the
+config (`CLAUDE.md`, `settings.json`, `keybindings.json`, `agents/`,
+`commands/`, `skills/`, `hooks/`, `output-styles/`, and `agent-memory/`, which
+subagents with user-scope memory write) becomes a commit on a branch, and
+anything else it wrote in `~/.claude` is dropped. Then Opus reviews the diff, in a container with no tools, no project
+and an empty config (it must not load the `CLAUDE.md` it reviews), and you
+decide. Opus does not decide alone, because there is no safe "text only"
+part to let through: a skill's or an agent's frontmatter can declare hooks,
+allowed tools, a shell and MCP servers; a skill can run an inline
+`` !`command` `` when it loads; and a `CLAUDE.md` line saying "run this first"
+works. The diff is written by the attacker, for a model to read, so it can
+address the reviewer too. Opus's verdict, and flags that need no model (hooks,
+executables, frontmatter, URLs, invisible Unicode), decide only how much you
+are shown: a one-line summary, or the whole diff.
 
-- `.claude.json`, which Claude rewrites constantly, can hold user-wide MCP
-  server definitions, which start in every later session.
-- `history.jsonl` holds your prompt history for all projects: a session can
-  read what you typed elsewhere.
-- `.credentials.json` (your login token) is readable by every session.
-- Any other file in `~/.claude` that a read-only setting points to, such as a
-  `statusLine` script. Keep such scripts in `hooks/`, which is read-only.
+**One login for all sessions, checked.** The login is in its own directory
+(`CLAUDE_SECURESTORAGE_CONFIG_DIR`), shared by all sessions, because a token
+refreshed by one session invalidates the copy another one holds. A session can
+also write it, for example to sign every later session into an attacker's
+account, which then receives your prompts and code. So whenever the login
+changed (by content: a session sets file times at will), the wrapper asks
+Anthropic's profile endpoint which account it belongs to, and quarantines it
+if that is not the account you confirmed at your first login, if Anthropic
+rejects it, or if it is written so that the wrapper could read one token and
+Claude Code use another. The token goes to `curl` on stdin, not on its command
+line. Nothing but the login stays in that directory: a file left there would
+otherwise be a channel between all projects' sessions, read through an
+accepted `@import`.
+
+**Per project.** `~/.claude/projects` (transcripts and auto-memory),
+`claude.json` and `history.jsonl` (prompt history) come from one directory per
+project. Memory is loaded into context at the start of every session, so with
+one shared directory a session could plant instructions in another project's
+memory; `claude.json` holds MCP servers and per-project approvals; and the
+history holds what you typed. Caches (`~/.cache`) are per project as well, so
+a poisoned package cache stays in its project.
+
+What goal 3 still does not cover:
+
+- **The login can be stolen.** Every session can read it. A stolen refresh
+  token gives its holder your account for weeks, and the account check only
+  catches a login that was *replaced*. Revoke it from your claude.ai settings
+  if you suspect a session. A credential proxy on the host, which keeps the
+  token out of the containers, would close this and the next three gaps; it is
+  the next thing to build (see [TODO.md](TODO.md)).
+- **A replaced login may never be caught.** Until the session that replaced it
+  ends (or the next wrapper starts), sessions running in parallel use it. And
+  a session that puts your original login back before it ends leaves nothing
+  to catch: the parallel sessions it redirected meanwhile go unnoticed.
+- **An expired login after a crash looks replaced.** If a wrapper dies after a
+  session refreshed the login, and the next one starts once the new token has
+  expired (hours later), Anthropic rejects it, and the wrapper quarantines it:
+  you log in again.
+- **A replaced refresh token can pass once.** A session that refreshes your
+  login itself gets your new access token, and can store it with *its own*
+  refresh token: the check sees your account. The next refresh then signs that
+  session into the other account, which is caught when it ends. Only the host
+  doing the refreshes (the credential proxy above) closes this.
+- **Detaching from the container** (`Ctrl-p Ctrl-q`) makes the wrapper believe
+  the session ended while it still runs: it then saves and checks too early.
+  Leave sessions with `/exit` or `Ctrl-d`.
+- **Memory imported by `just install`** goes to the project id of the path the
+  host's Claude Code recorded (the physical path). A project you reach through
+  a symlink gets another id in the sandbox, and does not see that memory.
+- **Plugins**, installed with `--config-rw`, are not reviewed.
+- **You can be fooled too.** The review shows you exactly what changed, with
+  control characters and invisible Unicode made visible, but reading a skill
+  carefully is your job: accept what you understand.
+- **The project's own Claude config** (`.claude/`, `.mcp.json`, `CLAUDE.md`)
+  loads in the next session in that project. The report lists its changes,
+  but nothing reviews them for you.
 
 ### Network
 
@@ -464,10 +676,11 @@ The wrapper mounts a generated `/etc/claude-code/CLAUDE.md`, the place Claude
 Code reads managed-policy instructions from. Claude loads it in every session,
 before your own `CLAUDE.md`, and cannot change it. It says that Claude is in a
 container, maps the paths Claude sees to the host paths you see, and lists what
-fails here and why: the read-only config (or not, with `--config-rw`), the
-read-only `.git/config`, no credentials for `git push`, no root, per-project
-memory, and the kind cluster with `--kind`. So instead of trying and failing,
-Claude tells you what to run on the host, with paths you can paste.
+fails here and why: the read-only `.git/config`, no credentials for `git push`,
+no root, per-project memory, the reviewed global config (change it only when
+asked, and say it will be reviewed), read-only plugins (or not, with
+`--config-rw`), and the kind cluster with `--kind`. So instead of trying and
+failing, Claude tells you what to run on the host, with paths you can paste.
 
 ### Tab completion in dev shells
 

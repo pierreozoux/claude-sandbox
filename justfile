@@ -11,6 +11,10 @@ default:
 build *flags:
     docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) {{flags}} -t {{image}} .
 
+# Build the image, set up Claude's reviewed config, and import from ~/.claude
+install: build
+    zsh install.zsh
+
 # Update everything: base image pin, flake inputs, Claude Code pin, then rebuild
 update:
     docker pull -q debian:trixie-slim > /dev/null

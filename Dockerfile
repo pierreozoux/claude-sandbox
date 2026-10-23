@@ -15,7 +15,7 @@ ARG CLAUDE_SHA256_ARM64=fdd22e6cbb734d580f5664c48df4294eeec850218ff07f186f9af304
 # No sudo: nothing in the container should be able to become root.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      curl ca-certificates git less direnv bash-completion \
+      curl ca-certificates git less direnv bash-completion jq \
  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -g "${GID}" claude \
