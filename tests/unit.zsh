@@ -129,11 +129,14 @@ sandbox() {
   return 0
 }
 
-# The container's working directory for the project in $PWD
-wd() {
+# The wrapper's id for the project in $PWD
+pid() {
   local hash=$(print -rn -- $PWD | sha256sum)
-  print -r -- /work/${${PWD:t}//[^A-Za-z0-9_.-]/_}-${hash[1,8]}
+  print -r -- ${${PWD:t}//[^A-Za-z0-9_.-]/_}-${hash[1,8]}
 }
+
+# The container's working directory for the project in $PWD: its own path
+wd() { print -r -- ${PWD:A} }
 
 # The arguments after the image name
 cmd_after_image() {
@@ -155,6 +158,33 @@ test_refuses_path_with_colon() {
   sandbox
   assert_eq $rc 1
   assert_contains "$err" "contains ':'"
+}
+
+test_refuses_paths_the_container_needs() {
+  # /dev exists everywhere, the Nix build sandbox included
+  cd /dev
+  sandbox
+  assert_eq $rc 1
+  assert_contains "$err" "refusing to mount /dev"
+  assert_eq ${#args} 0
+  local p
+  for p in /nix/store/x /etc /usr/local/src/p /proc/1 /lib64 /home /home/claude \
+      /home/claude/.cache/p /home/claude/.claude /home/claude/.local/share/x; do
+    _claude_sandbox_reserved $p || fail "$p should be refused"
+  done
+  for p in /home/ada/src/p /home/claude/src/p /home/claudette /srv/p /tmp/p /opt/p \
+      /usr-src /mnt/data/p; do
+    ! _claude_sandbox_reserved $p || fail "$p should be allowed"
+  done
+}
+
+test_project_is_mounted_at_its_resolved_path() {
+  mkproj real git
+  cd $T && ln -s real link && cd link
+  sandbox
+  assert_has "$T/link:${T:A}/real" $args
+  assert_has "$T/link/.git/config:${T:A}/real/.git/config:ro" $args
+  assert_eq ${args[${args[(ie)-w]}+1]} ${T:A}/real
 }
 
 test_requires_host_nix() {
@@ -232,11 +262,11 @@ test_basic_invocation() {
   # claude-ID-PID-TIME, the session's id
   assert_eq ${${(M)args:#claude-my_proj-*}%-*-*} claude-$id
   assert_has "claude-cache-$id:/home/claude/.cache" $args
-  assert_has "$T/my proj:/work/$id" $args
+  assert_has "$T/my proj:${T:A}/my proj" $args
   assert_has /nix/store:/nix/store:ro $args
   assert_has "NIX_PATH=nixpkgs=$T/nixpkgs" $args
   assert_has "PATH=$T/bin:/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin" $args
-  assert_has /work/$id $args
+  assert_has "${T:A}/my proj" $args
   assert_eq "$(cmd_after_image)" $'claude\n--resume'
 }
 
@@ -480,7 +510,7 @@ test_reviewer_gets_the_diff_and_nothing_else() {
   assert_has "$CFG/auth:/home/claude/.claude-auth" $r
   assert_has --cap-drop=ALL $r
   assert_eq ${#${(M)r:#*:/home/claude/.claude}} 0 "no config, so not the CLAUDE.md it reviews"
-  assert_eq ${#${(M)r:#*:/work/*}} 0 "no project"
+  assert_eq ${#${(M)r:#$T/p*}} 0 "no project"
   assert_contains "$(<$T/review.stdin)" "+learned"
 }
 
@@ -608,7 +638,7 @@ test_session_whose_container_still_runs_is_left_alone() {
 test_claude_json_and_history_are_per_project() {
   mkproj a
   STUB_DOCKER_DOES='echo "{\"theme\": \"a\"}" > "$CLAUDE_DIR/.claude.json"; echo one >> "$CLAUDE_DIR/history.jsonl"' sandbox
-  local id=${$(wd):t}
+  local id=$(pid)
   assert_eq "$(<$CFG/state/$id/claude.json)" '{"theme": "a"}'
   STUB_DOCKER_DOES='cat "$CLAUDE_DIR/.claude.json" > "$T/seen"; echo two >> "$CLAUDE_DIR/history.jsonl"' sandbox
   assert_eq "$(<$T/seen)" '{"theme": "a"}'
@@ -628,7 +658,7 @@ test_new_projects_start_from_the_template() {
 
 test_parallel_sessions_keep_each_others_history() {
   mkproj p
-  local id=${$(wd):t}
+  local id=$(pid)
   # Both copies start from the same history; the first one ends before the other
   _claude_sandbox_session_open $CFG $id; local one=$REPLY fd1=$_CLAUDE_SANDBOX_LOCK_FD
   sleep 1
@@ -644,7 +674,7 @@ test_symlinked_state_is_not_copied_back() {
   print secret > $T/secret
   mkproj p
   STUB_DOCKER_DOES='ln -sf "$T/secret" "$CLAUDE_DIR/.claude.json"; rm -f "$CLAUDE_DIR/history.jsonl"; ln -s "$T/secret" "$CLAUDE_DIR/history.jsonl"' sandbox
-  local id=${$(wd):t}
+  local id=$(pid)
   assert_not_contains "$(<$CFG/state/$id/claude.json)" secret
   [[ ! -e $CFG/state/$id/history.jsonl ]] || assert_not_contains "$(<$CFG/state/$id/history.jsonl)" secret
 }
@@ -876,13 +906,43 @@ test_symlinked_login_is_quarantined() {
   [[ ! -e $T/curl.calls ]] || fail "no token to send"
 }
 
+test_sessions_move_from_the_old_container_path() {
+  mkproj p
+  local id=$(pid) old=/work/$(pid) new=$(wd)
+  local dir=$CFG/projects/$id st=$CFG/state/$id
+  mkdir -p $dir/${old//[^A-Za-z0-9]/-}/memory $st
+  print fact > $dir/${old//[^A-Za-z0-9]/-}/memory/a.md
+  jq -n --arg o $old '{projects: {($o): {hasTrustDialogAccepted: true}, "/x": {}}}' > $st/claude.json
+  print -l "{\"display\":\"hi\",\"project\":\"$old\"}" '{"display":"x","project":"/x"}' > $st/history.jsonl
+  sandbox
+  assert_eq "$(<$dir/${new//[^A-Za-z0-9]/-}/memory/a.md)" fact
+  [[ ! -e $dir/${old//[^A-Za-z0-9]/-} ]] || fail "old directory left"
+  assert_eq "$(jq -c '.projects | keys' $st/claude.json)" "[\"$new\",\"/x\"]"
+  assert_eq "$(jq -r --arg n $new '.projects[$n].hasTrustDialogAccepted' $st/claude.json)" true
+  assert_eq "$(jq -r .project $st/history.jsonl)" "$new"$'\n'/x
+}
+
+test_sessions_at_the_new_path_are_kept() {
+  mkproj p
+  local id=$(pid) old=/work/$(pid) new=$(wd)
+  local dir=$CFG/projects/$id st=$CFG/state/$id
+  mkdir -p $dir/${old//[^A-Za-z0-9]/-} $dir/${new//[^A-Za-z0-9]/-} $st
+  print old > $dir/${old//[^A-Za-z0-9]/-}/s.jsonl
+  print new > $dir/${new//[^A-Za-z0-9]/-}/s.jsonl
+  jq -n --arg o $old --arg n $new '{projects: {($o): {a: 1}, ($n): {b: 2}}}' > $st/claude.json
+  sandbox
+  assert_eq "$(<$dir/${new//[^A-Za-z0-9]/-}/s.jsonl)" new
+  assert_eq "$(<$dir/${old//[^A-Za-z0-9]/-}/s.jsonl)" old
+  assert_eq "$(jq -c --arg n $new '.projects[$n]' $st/claude.json)" '{"b":2}'
+}
+
 test_claude_sessions_are_per_project() {
   mkproj a/app; sandbox; local one=${(M)args:#*:/home/claude/.claude/projects}
   mkproj b/app; sandbox; local two=${(M)args:#*:/home/claude/.claude/projects}
   [[ -n $one && $one != $two ]] || fail "both projects use [$one]"
   [[ $one == $HOME/.config/claude-sandbox/projects/app-*:* ]] || fail "unexpected [$one]"
   [[ -d ${one%%:*} ]] || fail "${one%%:*} should be created"
-  assert_has /work/${${two%%:*}:t} $args
+  assert_has $T/b/app:$T/b/app $args
 }
 
 
@@ -900,9 +960,9 @@ test_instructions_describe_the_session() {
   local src=${${(M)args:#*:/etc/claude-code/CLAUDE.md:ro}%%:*}
   [[ -n $src ]] || fail "instructions not mounted"
   [[ ! -e $src ]] || fail "$src left behind"
-  assert_contains "$instructions" "| \`$(wd)\` (this project, read-write) | \`$T/p\` |"
+  assert_contains "$instructions" "| \`$(wd)\` (this project, read-write, at its host path) | \`$T/p\` |"
   assert_contains "$instructions" "\`$CFG/config\` (approved config"
-  assert_contains "$instructions" "\`$CFG/projects/${$(wd):t}\`"
+  assert_contains "$instructions" "\`$CFG/projects/$(pid)\`"
   assert_contains "$instructions" "the user reviews what you"
   assert_contains "$instructions" "Started without \`--config-rw\`: \`~/.claude/plugins\` is read-only"
   assert_not_contains "$instructions" "--kind"
@@ -1050,6 +1110,42 @@ test_report_lists_nested_repositories() {
   assert_not_contains "$err" "$T/p/.git"$'\n'
 }
 
+test_report_leaves_out_worktrees_of_the_project() {
+  mkproj p git
+  git commit -q --allow-empty -m init
+  STUB_DOCKER_DOES='git worktree add -q .claude/worktrees/a && git worktree add -q -b b sub/b' sandbox
+  assert_not_contains "$err" "nested git repositories"
+}
+
+test_report_lists_worktrees_that_lead_elsewhere() {
+  mkproj p git
+  git commit -q --allow-empty -m init
+  git init -q ../other && git -C ../other commit -q --allow-empty -m init
+  local planted
+  # A repository planted in .git, whose worktree w would look like one of the
+  # project's to a check that resolves .. before symlinks, as git does not
+  local stash='git init -q .git/stash && git -C .git/stash commit -q --allow-empty -m s &&
+    git -C .git/stash worktree add -q --detach $PWD/.git/stash/wt &&
+    mkdir -p .git/stash/a/b .git/worktrees/wt w && echo ../.. > .git/worktrees/wt/commondir &&
+    ln -s $PWD/.git/stash/a/b w/link'
+  # Another repository's, a redirected commondir, a config.worktree, a
+  # symlink, relative links, a copy of another worktree's .git, and the
+  # planted repository reached through a symlink or through ..
+  for planted in \
+      'git -C ../other worktree add -q --detach $PWD/w' \
+      'git worktree add -q --detach w && echo /tmp > .git/worktrees/w/commondir' \
+      'git worktree add -q --detach w && touch .git/worktrees/w/config.worktree' \
+      'git worktree add -q --detach w && mv .git/worktrees/w ../moved && ln -s ../../../moved .git/worktrees/w' \
+      'git -c worktree.useRelativePaths=true worktree add -q --detach w' \
+      'git worktree add -q --detach real && mkdir w && cp real/.git w/.git' \
+      "$stash"' && echo "gitdir: link/../../.git/worktrees/wt" > w/.git' \
+      "$stash"' && echo "gitdir: $PWD/.git/worktrees/../stash/.git/worktrees/wt" > w/.git'; do
+    STUB_DOCKER_DOES=$planted sandbox
+    assert_contains "$err" "$T/p/w/.git"
+    rm -rf w real .git/worktrees .git/stash ../moved
+  done
+}
+
 test_report_quarantines_commondir() {
   mkproj p git
   STUB_DOCKER_DOES='echo /tmp/evil > .git/commondir' sandbox
@@ -1170,7 +1266,7 @@ test_install_imports_project_memory_after_review() {
   print sandboxed > $src/projects/-sandboxed/memory/z.md
   local hash=$(print -rn -- $proj | sha256sum)
   local id=app-${hash[1,8]}
-  local wkey=/work/$id
+  local wkey=$proj
   local dest=$CFG/projects/$id/${wkey//[^a-zA-Z0-9]/-}/memory
   mkdir -p $dest && print -r -- '- [B](b.md) — b' > $dest/MEMORY.md
   STUB_INTERACTIVE=1 STUB_ANSWERS=a install_from $src

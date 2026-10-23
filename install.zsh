@@ -118,7 +118,7 @@ _claude_sandbox_import_memory() {
     name=${${cwd:t}//[^A-Za-z0-9_.-]/_}
     hash=$(print -rn -- $cwd | sha256sum)
     id=$name-${hash[1,8]}
-    key=/work/$id
+    key=${cwd:A}
     dest=$cfg/projects/$id/${key//[^a-zA-Z0-9]/-}/memory
     # Only projects with something new
     todo=()

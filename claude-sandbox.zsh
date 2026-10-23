@@ -53,9 +53,13 @@ claude-sandbox() {
   local name=${${PWD:t}//[^A-Za-z0-9_.-]/_}
   local hash=$(print -rn -- $proj | sha256sum)
   local id=${name}-${hash[1,8]}
-  # Claude keys sessions and memory on the working directory, so it must be
-  # unique per project too
-  local wd=/work/$id
+  # The project's own path, so that the paths Claude writes, such as git
+  # worktree links, hold on the host too
+  local wd=${proj:A}
+  if _claude_sandbox_reserved $wd; then
+    print -u2 "claude-sandbox: refusing to mount $wd, where the container keeps its own files"
+    return 1
+  fi
 
   if [[ ! -d $cfg/config/.git ]]; then
     print -u2 "claude-sandbox: no config repository in $cfg/config;"
@@ -142,6 +146,7 @@ claude-sandbox() {
   # (config.zsh), and what it changes there reaches later sessions only once
   # you accept it. Settle what earlier sessions left first.
   _claude_sandbox_recover $cfg
+  _claude_sandbox_move_project $cfg $id /work/$id $wd
   _claude_sandbox_auth_check $cfg
   _claude_sandbox_review_pending $cfg
   # The reviewer's container may have refreshed the login: check that too
@@ -222,7 +227,7 @@ give the user the exact command to run on the host, with the host paths below.
 
 | In the container | On the host |
 |---|---|
-| \`$wd\` (this project, read-write) | \`$proj\` |
+| \`$wd\` (this project, read-write, at its host path) | \`$proj\` |
 | \`~/.claude\` (this session's copy of the global config) | \`$cfg/config\` (approved config, a git repository) |
 | \`~/.claude/projects\` (sessions and memory of this project only) | \`$cfg/projects/$id\` |
 | \`~/.claude/plugins\` | \`$cfg/plugins\` |
@@ -235,6 +240,8 @@ give the user the exact command to run on the host, with the host paths below.
   fail: ask the user to run them on the host.
 - \`.git/config\` and \`.git/hooks\` (and those of submodules) are read-only:
   the repository's \`git config\` cannot change. Give the user the host command.
+- Never run \`git worktree prune\`: worktrees outside the project look missing
+  from here, and pruning deletes what git keeps of them.
 - No root, no sudo, no apt, no Docker. Get tools with Nix:
   \`nix shell nixpkgs#tool\`, or add them to the project's dev shell. Builds run
   on the host's nix-daemon, as an untrusted user; \`/nix/store\` is read-only.
@@ -336,7 +343,9 @@ _claude_sandbox_audit() {
 
   # Nested repositories (dirs, gitdir files) and bare-repo lookalikes: entering
   # them on the host makes git read their config, e.g. core.fsmonitor.
-  repos=(${(f)"$(find $proj -path $proj/.git -prune -o -name .git -print 2>/dev/null)"})
+  for f in ${(f)"$(find $proj -path $proj/.git -prune -o -name .git -print 2>/dev/null)"}; do
+    _claude_sandbox_is_worktree $proj $f || repos+=($f)
+  done
   for f in ${(f)"$(find $proj -path $proj/.git -prune -o -type f -name HEAD -print 2>/dev/null)"}; do
     [[ -d ${f:h}/objects && -d ${f:h}/refs ]] && bare+=(${f:h})
   done
@@ -365,4 +374,64 @@ _claude_sandbox_audit() {
     print -u2 "  (settings, hooks, skills, MCP servers, instructions):"
     _claude_sandbox_list $touched
   fi
+}
+
+# _claude_sandbox_is_worktree PROJECT FILE: FILE is the .git of a linked
+# worktree of PROJECT's repository (claude --worktree) that leads git nowhere
+# but the repository's own, read-only, config and hooks
+_claude_sandbox_is_worktree() {
+  emulate -L zsh
+  local proj=${1:A} f=$2 line name t
+  local wts=$proj/.git/worktrees
+  [[ -f $f && ! -L $f ]] || return 1
+  # Exactly what git writes, compared as text: resolving the path here could
+  # disagree with git (zsh's :A drops .. before following symlinks)
+  line=$(<$f)
+  name=${line#gitdir: $wts/}
+  [[ $line == "gitdir: $wts/$name" && $name != (|.|..|*/*) ]] || return 1
+  t=$wts/$name
+  # No symlink on the way, so that commondir's ../.. is the repository's .git
+  [[ ! -L $proj/.git && ! -L $wts && -d $t && ! -L $t ]] || return 1
+  # Its link back to this checkout
+  [[ -f $t/gitdir && ! -L $t/gitdir && "$(<$t/gitdir)" == "${f:h:A}/.git" ]] || return 1
+  [[ -f $t/commondir && ! -L $t/commondir && "$(<$t/commondir)" == ../.. ]] || return 1
+  # Read with extensions.worktreeConfig, and protected only once it exists
+  [[ ! -e $t/config.worktree && ! -L $t/config.worktree ]]
+}
+
+# _claude_sandbox_move_project CFG ID OLD NEW: what Claude Code keeps by the
+# project's path (sessions and memory, trust, prompt history), from the path
+# the container used to mount it at, OLD, to NEW. Only what NEW lacks.
+_claude_sandbox_move_project() {
+  emulate -L zsh
+  local cfg=$1 id=$2 old=$3 new=$4 tmp
+  local dir=$cfg/projects/$id st=$cfg/state/$id
+  # Claude Code's directory name for a path
+  local from=$dir/${old//[^A-Za-z0-9]/-} to=$dir/${new//[^A-Za-z0-9]/-}
+  [[ -d $from && ! -L $from && ! -e $to ]] && mv $from $to
+  # grep first: without jq on the host, each jq is a container
+  if [[ -f $st/claude.json ]] && grep -qF "\"$old\"" $st/claude.json &&
+     _claude_sandbox_jq -e --arg o $old --arg n $new \
+       '.projects | has($o) and (has($n) | not)' < $st/claude.json > /dev/null 2>&1; then
+    tmp=$(mktemp $st/claude.json.XXXXXX) &&
+      _claude_sandbox_jq --arg o $old --arg n $new \
+        '.projects |= with_entries(if .key == $o then .key = $n else . end)' \
+        < $st/claude.json > $tmp && mv $tmp $st/claude.json || rm -f $tmp
+  fi
+  if [[ -f $st/history.jsonl ]] && grep -qF "\"$old\"" $st/history.jsonl; then
+    tmp=$(mktemp $st/history.jsonl.XXXXXX) &&
+      _claude_sandbox_jq -c --arg o $old --arg n $new \
+        'if .project == $o then .project = $n else . end' \
+        < $st/history.jsonl > $tmp && mv $tmp $st/history.jsonl || rm -f $tmp
+  fi
+  return 0
+}
+
+# _claude_sandbox_reserved PATH: mounting a project at PATH would cover the
+# image's system directories or the container's home
+_claude_sandbox_reserved() {
+  emulate -L zsh
+  [[ $1 == /(nix|usr|etc|bin|sbin|lib|lib32|lib64|libx32|proc|sys|dev|run|boot)(|/*) ||
+     /home/claude == $1(|/*) ||
+     $1 == /home/claude/.(claude|claude-auth|cache|local|kube)(|/*) ]]
 }

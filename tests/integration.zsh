@@ -88,8 +88,8 @@ test_runs_as_you_without_privileges() {
 
 test_sees_only_the_project() {
   mkproj p
-  sandbox sh -c 'ls /work; test -e /var/run/docker.sock && echo docker-socket; test -e ~/.ssh && echo ssh; true'
-  [[ $out == p-???????? ]] || fail "expected only the project, got [$out]"
+  sandbox sh -c 'pwd; ls -A ..; test -e /var/run/docker.sock && echo docker-socket; test -e ~/.ssh && echo ssh; true'
+  assert_eq "$out" "${T:A}/p"$'\n'p "the project, at its host path, and nothing next to it"
 }
 
 test_exit_status_comes_back() {
@@ -138,6 +138,23 @@ test_report_flags_planted_repositories() {
   assert_contains "$err" "$T/p/sub/.git"
   [[ ! -e .git/commondir ]] || fail "commondir left in place"
   git status > /dev/null || fail "host git should still work"
+}
+
+test_worktrees_work_in_the_container_and_on_the_host() {
+  mkproj p git
+  # Made in the container, as `claude --worktree` does
+  sandbox sh -c 'git worktree add -q .claude/worktrees/c && cd .claude/worktrees/c &&
+    git commit -q --allow-empty -m in-container'
+  assert_eq $rc 0 "$err"
+  assert_not_contains "$err" "nested git repositories"
+  assert_eq "$(git -C .claude/worktrees/c log -1 --format=%s)" in-container
+  assert_not_contains "$(git worktree list --porcelain)" prunable
+  # Made on the host
+  git worktree add -q .claude/worktrees/h
+  sandbox sh -c 'git -C .claude/worktrees/h log -1 --format=%s && git worktree list --porcelain'
+  assert_eq $rc 0 "$err"
+  assert_contains "$out" init
+  assert_not_contains "$out" prunable
 }
 
 # --- Claude

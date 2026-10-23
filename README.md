@@ -50,8 +50,8 @@ multi-user (daemon) mode, and zsh.
    claude-sandbox bash
    ```
 
-   You get a bash prompt inside the project's dev shell, at `/work/some-project-<hash>`
-   (the hash keeps projects with the same name apart).
+   You get a bash prompt inside the project's dev shell, at the same path as on
+   your host.
    Run `which` on one of the project's tools: the path is in `/nix/store`,
    served read-only from the host.
 
@@ -59,7 +59,7 @@ multi-user (daemon) mode, and zsh.
 
    ```sh
    ls ~          # an empty home, not yours
-   ls /work      # only this project
+   ls ..         # only this project
    git log -1    # works; commits are made as you
    ```
 
@@ -100,6 +100,26 @@ claude-sandbox bash
 
 Arguments after the options are run inside the dev shell. Use `--` if your
 command itself starts with `--`.
+
+### Work in a git worktree
+
+Use Claude Code's own option:
+
+```sh
+claude-sandbox claude --worktree my-task      # or -w; the name is optional
+```
+
+Claude works in `.claude/worktrees/my-task`, on a new branch
+`worktree-my-task`. Claude Code starts that branch from the remote's default
+branch, which it fetches first, not from the branch you are on. When the
+session ends, it asks whether to keep the worktree. Add `.claude/worktrees/`
+to the project's `.gitignore`, so your main checkout does not list it.
+
+The container sees the project at the same path as your host, so the
+worktree works on both sides: `cd` into it on the host, or merge its branch
+from your main checkout. Worktrees you make on the host inside the project
+work in the sandbox too; those outside the project do not, since the container
+cannot see them.
 
 ### Give Claude access to a kind cluster
 
@@ -297,8 +317,11 @@ claude-sandbox [--kind NAME] [--config-rw] [--] [command [args...]]
 | `--` | End of options. |
 | `command` | What to run in the dev shell. Default: `claude`. |
 
-The wrapper refuses to start in `$HOME` or `/`, when the path contains `:`, or
-before `just install` (no `~/.config/claude-sandbox/config`). The return value
+The wrapper refuses to start in `$HOME` or `/`, when the path contains `:`,
+under a directory the container needs (`/nix`, `/usr`, `/etc`, `/bin`, `/sbin`,
+`/lib*`, `/proc`, `/sys`, `/dev`, `/run`, `/boot`, the container's home
+`/home/claude` or what contains it, and its `.claude`, `.claude-auth`, `.cache`,
+`.local` and `.kube`), or before `just install` (no `~/.config/claude-sandbox/config`). The return value
 is the container's exit status.
 
 ### Files on the host
@@ -341,8 +364,8 @@ In `~/.config/claude-sandbox`:
 
 | Host | Container | Mode |
 |---|---|---|
-| project (`$PWD`) | `/work/<name>-<hash>` | rw |
-| `<project>/.git` | `/work/<name>-<hash>/.git` | rw, as its own mount |
+| project (`$PWD`) | the same path, symlinks resolved | rw |
+| `<project>/.git` | same path | rw, as its own mount |
 | `.git/config`, `.git/hooks`, and the same for each submodule in `.git/modules/` | same paths | **ro** |
 | `config.worktree` (when `extensions.worktreeConfig` is on), `.git/worktrees/*/{commondir,config.worktree}` | same paths | **ro** |
 | `/nix/store` | `/nix/store` | **ro** |
@@ -388,6 +411,7 @@ A bare `bash` is replaced by `/bin/bash`, the image's interactive bash.
 | `.git` is a file (linked worktree or submodule checkout) | Warning: its config is not protected. |
 | No `~/.config/claude-sandbox/config` | Refuses to start: run `just install`. |
 | A session's copy of the config whose wrapper and container are gone | Its changes become a pending change, and the copy is removed. |
+| The project's sessions, memory, trust or prompt history are still kept under `/work/<name>-<hash>`, where earlier versions mounted it | Moved to the project's path, unless something is there already. |
 | The login changed since it was last checked | Checked against the recorded account (see below). |
 | Changes to the config wait for review, and there is a terminal | Reviewed before the session starts. |
 
@@ -431,7 +455,7 @@ and after the reviews, since the reviewer's container can refresh it.
 | Finding | Action |
 |---|---|
 | `.git/commondir` exists | It is renamed to `commondir.quarantined`. |
-| Nested `.git` (directory or file) or bare-repository layout | Listed. |
+| Nested `.git` (directory or file) or bare-repository layout | Listed, except a worktree of the project's repository: its `.git` is exactly `gitdir: <project>/.git/worktrees/<name>`, nothing on that path is a symlink, the gitdir links back to it, `commondir` is `../..`, and there is no `config.worktree`. |
 | `.envrc`, `flake.nix`, `shell.nix`, `default.nix`, `justfile`, `Makefile`, `package.json`, `.gitattributes`, `.gitmodules`, `.pre-commit-config.yaml`, `.vscode/*`, `.github/workflows/*` modified during the session | Listed. |
 | `.claude/*`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md` modified during the session | Listed: the next session in this project loads them. |
 
@@ -532,6 +556,25 @@ filter drivers. The wrapper therefore makes these read-only:
 
 `.git` itself is a separate mount. A mountpoint cannot be renamed, so Claude
 cannot move it aside and create a fresh `.git` with its own config.
+
+The project is mounted at its own path, not under a fixed directory such as
+`/work`, because git writes absolute paths into the repository: a linked
+worktree and its gitdir point at each other. Made at a path the host does not
+have, a worktree is broken on the host, and `git worktree prune` there deletes
+what git keeps of it. Git 2.48 can write relative links instead, but it marks
+the repository with `extensions.relativeWorktrees`, and Nix (libgit2) then
+refuses to open the repository: every flake in it breaks, on the host too.
+
+A worktree Claude makes has its gitdir in `.git/worktrees/`, which the session
+can write. The report leaves such a worktree out only when nothing in it leads
+git away from the repository's own read-only config and hooks: its `.git`
+is exactly the line git writes, `gitdir: <project>/.git/worktrees/<name>`,
+compared as text, nothing on that path is a symlink, the gitdir links back to
+it, `commondir` is `../..`, and it has no `config.worktree`. Text, because
+resolving the path in the wrapper can disagree with git: zsh drops `..`
+before it follows symlinks, git after, so `link/../..` could pass a resolved
+check and still lead git to a repository planted in `.git`. Later sessions
+mount the worktree's `commondir` read-only, like any linked worktree's.
 
 Claude can still create *new* repositories inside the project: a nested `.git`,
 a bare-repository layout, or a top-level `.git/commondir`. The wrapper cannot
@@ -676,7 +719,9 @@ The wrapper mounts a generated `/etc/claude-code/CLAUDE.md`, the place Claude
 Code reads managed-policy instructions from. Claude loads it in every session,
 before your own `CLAUDE.md`, and cannot change it. It says that Claude is in a
 container, maps the paths Claude sees to the host paths you see, and lists what
-fails here and why: the read-only `.git/config`, no credentials for `git push`,
+fails here and why: the read-only `.git/config` (and not to run
+`git worktree prune`, which deletes worktrees it cannot see from the
+container), no credentials for `git push`,
 no root, per-project memory, the reviewed global config (change it only when
 asked, and say it will be reviewed), read-only plugins (or not, with
 `--config-rw`), and the kind cluster with `--kind`. So instead of trying and
