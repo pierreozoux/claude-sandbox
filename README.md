@@ -183,7 +183,8 @@ CLAUDE_SANDBOX_DOCKER_HOST=unix:///run/other/docker.sock claude-sandbox
 
 The daemon must not remap uids, otherwise files in the project end up owned by
 another uid, and the nix-daemon sees a user other than you. Rootless Docker
-therefore does not work as is.
+therefore does not work as is. For rootless engines in general, see
+[Why rootful Docker](#why-rootful-docker).
 
 ---
 
@@ -441,3 +442,40 @@ start yourself inside the dev shell is the stdenv bash again; use `/bin/bash`.
 ## License
 
 [AGPL-3.0](LICENSE)
+
+### Why rootful Docker
+
+Rootful Docker has a cost: being in the `docker` group is equivalent to being
+root. Anything that runs as you on the host, such as a package's install
+script, can use the Docker socket to become root, and a container escape gives
+root too.
+
+Rootless Docker cannot fix this here, because it maps your uid to root inside
+the container and the container's users to subordinate uids on the host. Files
+in the project would no longer be yours, and the nix-daemon would see someone
+other than you.
+
+Rootless Podman does not have this problem: `--userns=keep-id` keeps your uid
+inside the container, so file ownership and the nix-daemon's view of you stay
+the same. You could then leave the `docker` group, and a container escape would
+give your user rather than root. The rest of the design (read-only mounts over
+`.git`, `--cap-drop=ALL`, `no-new-privileges`, named volumes) works the same.
+
+It is not used, because of **`--kind`**. kind clusters run on rootful Docker's
+`kind` network, and a rootless container cannot join that network. The
+alternatives are worse than the problem they solve:
+
+- kind's Podman provider, in rootless mode, is still fragile: it needs cgroup
+  delegation that many hosts lack, and some workloads do not run in it.
+- Reaching the API server through the port that kind publishes on the host
+  means opening the host's loopback to the container, and using a different
+  kubeconfig than the one the cluster's own containers use.
+
+Smaller issues would also need work: memory and pids limits need cgroup v2
+delegation to the user, Ubuntu's AppArmor rules for user namespaces only cover
+the distribution's own `podman` (not one from the Nix store), SELinux hosts need
+`--security-opt label=disable` (relabelling `/nix/store` with `:z` would be a
+disaster), and the tests would have to run against both engines.
+
+If you do not use `--kind`, rootless Podman is the better trade, and porting
+the wrapper to it is mostly a matter of changing the `docker run` flags.
