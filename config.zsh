@@ -426,6 +426,7 @@ _claude_sandbox_review_pending() {
 _claude_sandbox_merge() {
   emulate -L zsh
   local cfg=$1 ref=$2 repo=$1/config base
+  local -a conflicts
   if [[ -n $(_claude_sandbox_cgit $repo status --porcelain) ]]; then
     print -u2 "  $repo has uncommitted changes; commit or discard them. The change waits."
     return 1
@@ -435,12 +436,36 @@ _claude_sandbox_merge() {
     _claude_sandbox_cgit $repo merge -q --ff-only $ref || return 1
   # Another session's change was accepted since this one started
   elif ! _claude_sandbox_cgit $repo cherry-pick $ref >/dev/null 2>&1; then
+    conflicts=(${(0)"$(_claude_sandbox_cgit $repo diff -z --name-only --diff-filter=U)"})
     _claude_sandbox_cgit $repo cherry-pick --abort 2>/dev/null
-    print -u2 "  it conflicts with a change accepted since; merge $ref by hand in $repo"
-    return 1
+    # Every session that syncs skills from claude.ai rewrites the sync's
+    # bookkeeping: there, the change being accepted wins
+    if ! _claude_sandbox_sync_only $conflicts ||
+       ! _claude_sandbox_cgit $repo cherry-pick -X theirs $ref >/dev/null 2>&1; then
+      _claude_sandbox_cgit $repo cherry-pick --abort 2>/dev/null
+      print -u2 "  it conflicts with a change accepted since; merge it by hand:"
+      print -u2 "    cd $repo"
+      print -u2 "    git cherry-pick $ref"
+      print -u2 "    # resolve, git add, then:"
+      print -u2 "    git cherry-pick --continue && git branch -D $ref"
+      print -u2 "  or reject it at the next review"
+      return 1
+    fi
   fi
   _claude_sandbox_cgit $repo update-ref -d refs/heads/$ref
   print -u2 "  accepted: later sessions get it"
+}
+
+# _claude_sandbox_sync_only PATH...: whether there are paths and all are the
+# bookkeeping of skills synced from claude.ai (skills/synced/ID/manifest.json
+# and .last-complete-round), not a skill's own files
+_claude_sandbox_sync_only() {
+  emulate -L zsh
+  (( $# )) || return 1
+  local p
+  for p; do
+    [[ ${p:h:h} == skills/synced && ${p:t} == (manifest.json|.last-complete-round) ]] || return 1
+  done
 }
 
 # _claude_sandbox_sha TEXT: its sha256

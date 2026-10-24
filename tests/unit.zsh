@@ -487,6 +487,37 @@ test_conflicting_change_stays_pending() {
   [[ -z $(config status --porcelain) ]] || fail "cherry-pick left the checkout dirty"
 }
 
+test_conflicting_skill_sync_bookkeeping_merges() {
+  local d=skills/synced/org_user
+  approve $d/manifest.json '{"lastUpdated": 1}'
+  approve $d/.last-complete-round r0
+  mkproj p
+  STUB_DOCKER_DOES='d="$CLAUDE_DIR/skills/synced/org_user"; echo "{\"lastUpdated\": 2}" > "$d/manifest.json"; echo r1 > "$d/.last-complete-round"; mkdir -p "$d/a"; echo a > "$d/a/SKILL.md"' sandbox
+  STUB_DOCKER_DOES='d="$CLAUDE_DIR/skills/synced/org_user"; echo "{\"lastUpdated\": 3}" > "$d/manifest.json"; echo r2 > "$d/.last-complete-round"; mkdir -p "$d/b"; echo b > "$d/b/SKILL.md"' sandbox
+  STUB_INTERACTIVE=1 STUB_ANSWERS='a a' sandbox
+  assert_not_contains "$err" "conflicts"
+  assert_eq "$(pending)" ""
+  assert_eq "$(config show HEAD:$d/a/SKILL.md)" a
+  assert_eq "$(config show HEAD:$d/b/SKILL.md)" b
+  assert_eq "$(config show HEAD:$d/.last-complete-round)" r2 "the change accepted last wins"
+  [[ -z $(config status --porcelain) ]] || fail "the checkout is dirty"
+}
+
+test_conflict_beyond_sync_bookkeeping_stays_pending() {
+  local d=skills/synced/org_user
+  approve $d/manifest.json '{"lastUpdated": 1}'
+  approve $d/a/SKILL.md a0
+  mkproj p
+  STUB_DOCKER_DOES='d="$CLAUDE_DIR/skills/synced/org_user"; echo "{\"lastUpdated\": 2}" > "$d/manifest.json"; echo a1 > "$d/a/SKILL.md"' sandbox
+  STUB_DOCKER_DOES='d="$CLAUDE_DIR/skills/synced/org_user"; echo "{\"lastUpdated\": 3}" > "$d/manifest.json"; echo a2 > "$d/a/SKILL.md"' sandbox
+  STUB_INTERACTIVE=1 STUB_ANSWERS='a a' sandbox
+  assert_contains "$err" "git cherry-pick session/"
+  assert_eq "$(config show HEAD:$d/a/SKILL.md)" a1
+  local -a refs=(${(f)"$(pending)"})
+  assert_eq $#refs 1
+  [[ -z $(config status --porcelain) ]] || fail "cherry-pick left the checkout dirty"
+}
+
 test_uncommitted_host_edits_block_the_merge() {
   mkproj p
   print 'edited on the host' > $CFG/config/CLAUDE.md

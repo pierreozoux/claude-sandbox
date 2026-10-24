@@ -420,6 +420,7 @@ A bare `bash` is replaced by `/bin/bash`, the image's interactive bash.
 | Finding | Action |
 |---|---|
 | The session changed the config (`CLAUDE.md`, `settings.json`, `keybindings.json`, `agents/`, `commands/`, `skills/`, `hooks/`, `output-styles/`, `agent-memory/`) | Committed on a branch `session/<id>` (dots in the id become `_`), then reviewed: Opus's verdict and notes, flags (below), then `[a]ccept, [r]eject, [d]iff, [l]ater`. Without a terminal, it waits. |
+| An accepted change conflicts with one accepted since | If only the bookkeeping of skills synced from claude.ai conflicts (`skills/synced/*/manifest.json`, `.last-complete-round`), the change being accepted wins there. Otherwise it stays pending, with the commands to merge it by hand. |
 | A `.git` or `.gitattributes` inside those directories (a cloned skill, say) | Dropped before the commit, and listed: the skill's files are kept. |
 | Saving the change fails | The copy is moved to `failed/`, with a warning. |
 | Anything else written in `~/.claude` (`plans/`, `todos/`, `file-history/`, …) | Dropped with the copy. |
